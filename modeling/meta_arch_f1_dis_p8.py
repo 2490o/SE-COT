@@ -75,8 +75,8 @@ class ClassSpecificPrototypeClustering(nn.Module):
         prototypes = F.normalize(prototypes, dim=2)  # 归一化
 
     
-        self.current_prototypes = prototypes  # 用于损失计算
-        return features  # 原型增强后的特征
+        self.current_prototypes = prototypes
+        return features
 
 class specific(nn.Module):
     def __init__(self):
@@ -218,7 +218,6 @@ class ClipRCNNWithClipBackbone(GeneralizedRCNN):
         features['res4'] = self.conv_out(basef) + features['res4']
         features['res4'] = self.pro(features['res4'])
 
-
         if detected_instances is None:
             if self.proposal_generator is not None:
                 logits, proposals, _ = self.proposal_generator(images, features, None)
@@ -259,14 +258,13 @@ def calc_mean_std(feat, eps=1e-5):
 class ChainOfThoughtPromptGenerator:
     def __init__(self, base_vocabs, clip_model):
         """
-        base_vocabs: 基础词汇库，格式为{类型: [词汇列表]}
-        clip_model: CLIP模型用于文本编码
+
         """
-        self.vocabs = base_vocabs  # 例如 {'weather': ['rainy', 'foggy'], 'time': ['night', 'dusk']}
+        self.vocabs = base_vocabs
         self.clip_model = clip_model
-        self.stage1_vocab = {}  # 基础词汇
-        self.stage2_phrases = {}  # 组合短语
-        self.stage3_sentences = {}  # 完整句子
+        self.stage1_vocab = {}
+        self.stage2_phrases = {}
+        self.stage3_sentences = {}
         self._build_prompts()
 
     def _build_prompts(self):
@@ -320,7 +318,7 @@ class ChainOfThoughtPromptGenerator:
                 stage3_features = stage3_features.mean(dim=0, keepdim=True)
             all_text_features.append(stage3_features)
 
-        # 融合多阶段特征（对应论文公式F_t^1, F_t^2, F_t^3）
+
         evolved_features = all_text_features[0]
         for feat in all_text_features[1:]:
             evolved_features += feat
@@ -348,23 +346,24 @@ class ClipRCNNWithClipBackboneWithOffsetGenTrainable(ClipRCNNWithClipBackbone):
             nn.Parameter(torch.ones(1, 1024, 1, 1))  # 标准差
         ])
 
-
-        self.style_extractor = nn.Conv2d(1024, 1024, kernel_size=1)
-        self.content_extractor = nn.Conv2d(1024, 1024, kernel_size=1)
+        self.di = invariant()
+        self.ds = specific()
+        # self.style_extractor = nn.Conv2d(1024, 1024, kernel_size=1)
+        # self.content_extractor = nn.Conv2d(1024, 1024, kernel_size=1)
         self.contrastive_loss = nn.CrossEntropyLoss()
 
 
         self.prototype_clustering = ClassSpecificPrototypeClustering(1024, num_classes=8)  # 假设8个类别
 
     def forward(self, batched_inputs):
-       .
+
         images = self.preprocess_image(batched_inputs)
         features = self.backbone(images.tensor)
-        base_features = features['res4']  # 假设res4是特征图
+        base_features = features['res4']
 
 
-        style_features = self.style_extractor(base_features)
-        content_features = self.content_extractor(base_features)
+        style_features = self.ds(base_features)
+        content_features = self.di(base_features)
 
 
         evolved_text_features = self.cot_prompt_generator.generate_evolution_features(
@@ -386,7 +385,7 @@ class ClipRCNNWithClipBackboneWithOffsetGenTrainable(ClipRCNNWithClipBackbone):
         )
         styled_features = std * normalized_style + mean
 
-        # 5. 融合风格和内容特征
+
         fused_features = torch.cat([content_features, styled_features], dim=1)
         fused_features = self.conv_out(fused_features) + base_features
         features['res4'] = self.pro(fused_features)
@@ -397,7 +396,7 @@ class ClipRCNNWithClipBackboneWithOffsetGenTrainable(ClipRCNNWithClipBackbone):
     def opt_offsets(self, batched_inputs):
 
         for stage in range(1, self.style_evolution_stages + 1):
-            # 生成各阶段文本特征
+
             stage_features = self.cot_prompt_generator.generate_evolution_features(stage=stage)
             stage_features = stage_features.view(1, -1, 1, 1).cuda()
 
@@ -476,146 +475,6 @@ class ClipRCNNWithClipBackboneWithOffsetGenTrainable(ClipRCNNWithClipBackbone):
                        f'reg_loss_{name}': total_reg / len(self.domain_tk)})
 
         return losses
-
-
-@META_ARCH_REGISTRY.register()
-class ClipRCNNWithClipBackboneWithOffsetGenTrainableVOC(ClipRCNNWithClipBackbone):
-
-    def __init__(self, cfg) -> None:
-        super().__init__(cfg)
-
-        domain_text = {'real': 'a realistic image'}
-
-        domain_text.update({str(0): 'an image in the comics style'})
-        domain_text.update({str(1): 'an image in the painting style'})
-        domain_text.update({str(2): 'an image in the cartoon style'})
-        domain_text.update({str(3): 'an image in the digital-art style'})
-        domain_text.update({str(4): 'an image in the sketch style'})
-        domain_text.update({str(5): 'an image in the watercolor painting style'})
-        domain_text.update({str(6): 'an image in the oil painting style'})
-        # self.offsets = nn.Parameter(offsets)
-        self.offsets = nn.Parameter(torch.zeros(len(domain_text) - 1, 1024, 14, 14))  # skip day
-
-        import clip
-        self.domain_tk = dict([(k, clip.tokenize(t)) for k, t in domain_text.items()])
-        self.apply_aug = cfg.AUG_PROB
-
-    def forward(self, batched_inputs):
-
-        if not self.training:
-            return self.inference(batched_inputs)
-
-        images = self.preprocess_image(batched_inputs)
-        b = images.tensor.shape[0]  # batchsize
-
-        if "instances" in batched_inputs[0]:
-            gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
-
-        features = self.backbone(images.tensor)
-
-        if np.random.rand(1) > self.apply_aug:
-            oids = np.random.choice(np.arange(len(self.offsets)), b)
-            change = torch.cat([self.offsets[oid:oid + 1].cuda().mean(dim=(2, 3), keepdims=True) for oid in oids], 0)
-            features['res4'] = features['res4'] + change
-
-        if self.proposal_generator is not None:
-            if self.training:
-                logits, proposals, proposal_losses = self.proposal_generator(images, features, gt_instances)
-            else:
-                logits, proposals, proposal_losses = self.proposal_generator(images, features, gt_instances)
-        else:
-            assert "proposals" in batched_inputs[0]
-            proposals = [x["proposals"].to(self.device) for x in batched_inputs]
-            proposal_losses = {}
-
-        try:
-            _, detector_losses = self.roi_heads(images, features, proposals, gt_instances, None, self.backbone)
-        except Exception as e:
-            print(e)
-            _, detector_losses = self.roi_heads(images, features, proposals, gt_instances, None)
-
-        if self.vis_period > 0:
-            storage = get_event_storage()
-            if storage.iter % self.vis_period == 0:
-                self.visualize_training(batched_inputs, proposals)
-                with torch.no_grad():
-                    ogimage = batched_inputs[0]['image']
-                    ogimage = convert_image_to_rgb(ogimage.permute(1, 2, 0), self.input_format)
-                    o_pred = Visualizer(ogimage, None).overlay_instances().get_image()
-
-                    vis_img = o_pred.transpose(2, 0, 1)
-                    storage.put_image('og-tfimage', vis_img)
-
-        losses = {}
-        losses.update(detector_losses)
-        losses.update(proposal_losses)
-        return losses
-
-    def opt_offsets(self, batched_inputs):
-
-        crops_clip = None
-        if 'randomcrops' in batched_inputs[0]:
-            rcrops = [x['randomcrops'] for x in batched_inputs]
-            rcrops = torch.cat(rcrops, 0)
-            crops_clip = rcrops.flip(1) / 255
-            mean = [0.48145466, 0.4578275, 0.40821073]
-            std = [0.26862954, 0.26130258, 0.27577711]
-            crops_clip = T.functional.normalize(crops_clip, mean, std)
-            crops_clip = crops_clip.cuda()
-
-        with torch.no_grad():
-            features = self.backbone(crops_clip)
-
-        losses = {}
-        total_dist = 0
-        total_reg = 0
-        total_chgn = 0
-        for i, val in enumerate(self.domain_tk.items()):
-            name, dtk = val
-            if name == 'real':
-                continue
-            with torch.no_grad():
-
-                # print(self.backbone.forward_res5(features['res4']))
-                wo_aug_im_embed = self.backbone.attention_global_pool(self.backbone.forward_res5(features['res4']))
-                wo_aug_im_embed = wo_aug_im_embed / wo_aug_im_embed.norm(dim=-1, keepdim=True)
-
-                day_text_embed = self.roi_heads.box_predictor.cls_score.model.encode_text(
-                    self.domain_tk['real'].cuda())  # day
-                day_text_embed = day_text_embed / day_text_embed.norm(dim=-1, keepdim=True)
-                new_text_embed = self.roi_heads.box_predictor.cls_score.model.encode_text(dtk.cuda())  # new_d
-                new_text_embed = new_text_embed / new_text_embed.norm(dim=-1, keepdim=True)
-                text_off = (new_text_embed - day_text_embed)
-                text_off = text_off / text_off.norm(dim=-1, keepdim=True)
-
-                wo_aug_im_tsl = wo_aug_im_embed + text_off
-                wo_aug_im_tsl = wo_aug_im_tsl / wo_aug_im_tsl.norm(dim=-1, keepdim=True)
-                wo_aug_im_tsl = wo_aug_im_tsl.unsqueeze(1).permute(0, 2, 1)
-
-            aug_feat = features['res4'].detach() + self.offsets[i - 1:i]
-
-            x = self.backbone.forward_res5(aug_feat)
-            im_embed = self.backbone.attention_global_pool(x)
-
-            im_embed = im_embed / im_embed.norm(dim=-1, keepdim=True)
-
-            cos_dist = 1 - im_embed.unsqueeze(1).bmm(wo_aug_im_tsl)
-
-            dist_loss = cos_dist.mean()
-
-            l1loss = torch.nn.functional.l1_loss(im_embed, wo_aug_im_embed)
-
-            total_dist += dist_loss
-            total_reg += l1loss
-
-        losses.update({f'cos_dist_loss_{name}': total_dist / len(self.domain_tk),
-                       f'reg_loss_{name}': total_reg / len(self.domain_tk)})
-        import pdb;
-        pdb.set_trace()
-        return losses
-
-
-
 
 
 
