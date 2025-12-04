@@ -1,0 +1,10 @@
+foggy, morning, haze
+windy, afternoon, gust
+snowy, evening, cold
+sunny, summer, bright
+stormy, night, dark
+rainy, morning, wet
+chilly, winter, mountain
+clear, spring, star
+hot, desert, heat
+misty, fall, dim
