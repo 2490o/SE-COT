@@ -42,7 +42,7 @@
 
 #### Train on Source Domain
 
-CUDA_VISIBLE_DEVICES=0 python train.py --config-file configs/diverse_weather.yaml
+CUDA_VISIBLE_DEVICES=0 python train_c.py --config-file configs/diverse_weather_c.yaml
 
 #### Test on Target Domain (e.g., Daytime-Foggy)
 
