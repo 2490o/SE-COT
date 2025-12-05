@@ -385,7 +385,7 @@ class ClipRCNNWithClipBackboneWithOffsetGenTrainable(ClipRCNNWithClipBackbone):
         base_di = self.di(features['res4'])
         # domain specific
         base_ds = self.ds(features['res4'])
-        proto =  self.final_prototype_module(features['res4'])
+        proto =  self.pro(features['res4'])
         # Sequential Once
         lossp = self.consistency_loss(proto, base_di)
         zero_loss_di_p = F.normalize(base_di) * F.normalize(features['res4'])
@@ -406,7 +406,7 @@ class ClipRCNNWithClipBackboneWithOffsetGenTrainable(ClipRCNNWithClipBackbone):
         basef = torch.cat((base_di, base_ds), dim=1)
         features['res4'] = self.conv_out(basef) + features['res4']
         # features['res4'] = self.pro(features['res4'])
-        features['res4'] = self.final_prototype_module(features['res4'])
+        features['res4'] = self.pro(features['res4'])
 
         if self.proposal_generator is not None:
             if self.training:
