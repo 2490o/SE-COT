@@ -1,0 +1,44 @@
+BASE_YAML: "COCO-Detection/faster_rcnn_R_101_C4_3x.yaml"
+DATASETS:
+        TRAIN: ("daytime_clear_train",)
+        TEST: ('daytime_clear_test',)
+DATALOADER:
+        NUM_WORKERS: 16
+INPUT:
+        MIN_SIZE_TRAIN: (1200,)
+        MIN_SIZE_TEST: 1200
+        CLIP_RANDOM_CROPS: True
+        RANDOM_CROP_SIZE: 750
+
+SOLVER:
+#        BASE_LR: 0.001
+#        MAX_ITER: 200000
+#        STEPS: [40000,]
+#        WARMUP_ITERS: 0
+#        IMS_PER_BATCH: 4
+#        CHECKPOINT_PERIOD: 1000000
+        BASE_LR: 0.0005       # 调整学习率
+        MAX_ITER: 200000      # 保持最大迭代次数不变，或者稍微调整
+        STEPS: [80000,]       # 调整衰减步数
+        WARMUP_ITERS: 0       # 如果不使用 warmup，保持不变
+        IMS_PER_BATCH: 8      # 更改 batch size
+        CHECKPOINT_PERIOD: 500000
+MODEL:
+        BACKBONE:
+                NAME: ClipRN101
+        WEIGHTS: ""
+        CLIP_IMAGE_ENCODER_NAME: 'RN101'
+        META_ARCHITECTURE: 'ClipRCNNWithClipBackboneWithOffsetGenTrainable'
+
+        PROPOSAL_GENERATOR:
+                NAME: 'SBRPN'
+        ROI_HEADS:
+                NAME: 'ClipRes5ROIHeadsAttn'        
+                # BATCH_SIZE_PER_IMAGE: 128   # faster, and good enough for this toy dataset (default: 512)
+                NUM_CLASSES: 7
+TEST:
+        EVAL_SAVE_PERIOD: 5000
+OUTPUT_DIR: "all_outs/diverse_weather_newp_COT3"
+VIS_PERIOD: 0
+OFFSET_OPT_INTERVAL: [20000000]
+OFFSET_OPT_ITERS: 10000
