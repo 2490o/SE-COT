@@ -16,7 +16,7 @@
   - Dusk-Rainy  
   - Night-Rainy  
   - Daytime-Foggy
- 
+
    **Generalization from Reality to Art**  
   Contains Four conditions:  
   - Real  
@@ -42,7 +42,7 @@
 
 #### Train on Source Domain
 
-CUDA_VISIBLE_DEVICES=0 python train_c.py --config-file configs/diverse_weather_c.yaml
+CUDA_VISIBLE_DEVICES=0 python train_datac.py --config-file configs/diverse_weather_c.yaml
 
 #### Test on Target Domain (e.g., Daytime-Foggy)
 
