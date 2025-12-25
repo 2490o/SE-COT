@@ -3,8 +3,8 @@ import os
 import logging
 import time
 from collections import OrderedDict, Counter
-import copy 
-
+import copy
+import cv2
 import numpy as np
 
 import torch
@@ -20,9 +20,9 @@ from detectron2.engine import default_argument_parser, hooks, HookBase
 from detectron2.solver.build import get_default_optimizer_params, maybe_add_gradient_clipping, build_lr_scheduler
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.data import build_detection_train_loader, build_detection_test_loader, get_detection_dataset_dicts
-from detectron2.data.common import  DatasetFromList, MapDataset
+from detectron2.data.common import DatasetFromList, MapDataset
 from detectron2.data.samplers import InferenceSampler
-from detectron2.utils.events import  get_event_storage
+from detectron2.utils.events import get_event_storage
 
 from detectron2.utils import comm
 from detectron2.evaluation import COCOEvaluator, verify_results, print_csv_format, inference_on_dataset
@@ -35,6 +35,10 @@ from fvcore.common.param_scheduler import ParamScheduler
 from fvcore.common.checkpoint import Checkpointer
 
 from data.datasets import builtin
+
+from PIL import Image
+import random
+from dataAC import ACVCGenerator
 
 from detectron2.evaluation import PascalVOCDetectionEvaluator, COCOEvaluator
 
@@ -52,35 +56,106 @@ from modeling import CustomPascalVOCDetectionEvaluator
 
 logger = logging.getLogger("detectron2")
 
+
 def setup(args):
     cfg = get_cfg()
     add_stn_config(cfg)
-    #hack to add base yaml 
+    # hack to add base yaml
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_file(model_zoo.get_config_file(cfg.BASE_YAML))
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
-    #cfg.freeze()
+    # cfg.freeze()
     default_setup(cfg, args)
     return cfg
 
+
 class CustomDatasetMapper(DatasetMapper):
-    def __init__(self,cfg,is_train) -> None:
-        super().__init__(cfg,is_train)
+    def __init__(self, cfg, is_train) -> None:
+        super().__init__(cfg, is_train)
         self.with_crops = cfg.INPUT.CLIP_WITH_IMG
         self.with_random_clip_crops = cfg.INPUT.CLIP_RANDOM_CROPS
         self.with_jitter = cfg.INPUT.IMAGE_JITTER
-        self.cropfn = T.RandomCrop#T.RandomCrop([224,224])
+        self.cropfn = T.RandomCrop  # T.RandomCrop([224,224])
         self.aug = T.ColorJitter(brightness=.5, hue=.3)
         self.crop_size = cfg.INPUT.RANDOM_CROP_SIZE
 
-    def __call__(self,dataset_dict):
-        dataset_dict = copy.deepcopy(dataset_dict)  # it will be modified by code below
-        # USER: Write your own image loading if it's not from a file
+        self.debug_save_dir = '/home/zzh/domaingen/data'
+        self.debug_count = 0
+        self.max_debug_save = 20
+
+        if is_train:
+            self.acvc = ACVCGenerator()
+            self.corruption_func = [
+                "defocus_blur", "glass_blur", "gaussian_blur", "motion_blur",
+                "speckle_noise", "shot_noise", "impulse_noise", "gaussian_noise",
+                "jpeg_compression", "pixelate", "elastic_transform",
+                "brightness", "saturate", "contrast", "high_pass_filter", "phase_scaling"
+            ]
+            # 设置数据增强的概率 (例如 0.5 表示 50% 的概率变坏，50% 保持原图)
+            # 如果你想完全模拟之前的 'cp' 数据集混合效果，这个比例很重要
+            self.corruption_prob = 0.5
+
+    def apply_corruption(self, image_bgr):
+        """
+        严格模仿离线代码的处理流程
+        Args:
+            image_bgr: Detectron2 读取的图片，格式为 NumPy BGR
+        Returns:
+            image_bgr_corrupted: 处理后的图片，格式为 NumPy BGR
+        """
+        # 1. 转换为 RGB
+        # 确保这里使用的是参数名 image_bgr
+        img_rgb = image_bgr[:, :, ::-1]
+
+        # 2. 随机选择增强
+        c_type = random.choice(self.corruption_func)
+        severity = random.randint(1, 5)
+
+        try:
+            # 3. 直接传入 RGB NumPy 数组
+            aug_result = self.acvc.apply_corruption(img_rgb, c_type, severity)
+
+            # 4. 处理返回结果 (兼容 PIL 和 Numpy)
+            if isinstance(aug_result, Image.Image):
+                aug_result = np.array(aug_result.convert("RGB"))
+
+            # 5. 转回 BGR 给 Detectron2 使用
+            return aug_result[:, :, ::-1]
+
+        except Exception as e:
+            print(f"[Warning] Corruption {c_type} failed: {e}")
+            # 如果出错，返回原始图像 (参数名 image_bgr)
+            return image_bgr
+
+    def __call__(self, dataset_dict):
+        dataset_dict = copy.deepcopy(dataset_dict)
+
+        # 1. 读取原始图片 (daytime_clear 下的图片)
         image = utils.read_image(dataset_dict["file_name"], format=self.image_format)
         utils.check_image_size(dataset_dict, image)
-        
-        # USER: Remove if you don't do semantic/panoptic segmentation.
+
+        # --- 新增：在线应用数据增强 (Only during training) ---
+        if self.is_train and np.random.rand() < self.corruption_prob:
+            # 对 image (numpy array) 直接进行破坏
+            image = self.apply_corruption(image)
+
+        # if self.debug_count < self.max_debug_save:
+        #     try:
+        #         # 加上时间戳防止文件名冲突
+        #         timestamp = int(time.time() * 1000)
+        #         filename = f"debug_aug_{self.debug_count}_{timestamp}.jpg"
+        #         save_path = os.path.join(self.debug_save_dir, filename)
+        #
+        #         cv2.imwrite(save_path, image)
+        #         print(f"[DEBUG] Saved augmented image to: {save_path}")
+        #
+        #         self.debug_count += 1
+        #     except Exception as e:
+        #         print(f"Failed to save debug image: {e}")
+        # ------------------------------------------------
+
+        # 2. 后续原有的处理流程 (语义分割、转换、Tensor化等) 保持不变
         if "sem_seg_file_name" in dataset_dict:
             sem_seg_gt = utils.read_image(dataset_dict.pop("sem_seg_file_name"), "L").squeeze(2)
         else:
@@ -91,10 +166,8 @@ class CustomDatasetMapper(DatasetMapper):
         image, sem_seg_gt = aug_input.image, aug_input.sem_seg
 
         image_shape = image.shape[:2]  # h, w
-        # Pytorch's dataloader is efficient on torch.Tensor due to shared-memory,
-        # but not efficient on large generic data structures due to the use of pickle & mp.Queue.
-        # Therefore it's important to use torch.Tensor.
         dataset_dict["image"] = torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1)))
+
         if sem_seg_gt is not None:
             dataset_dict["sem_seg"] = torch.as_tensor(sem_seg_gt.astype("long"))
 
@@ -104,7 +177,7 @@ class CustomDatasetMapper(DatasetMapper):
             utils.transform_proposals(
                 dataset_dict, image_shape, transforms, proposal_topk=self.proposal_topk
             )
-       
+
         if not self.is_train:
             # USER: Modify this if you want to keep them for some reason.
             dataset_dict.pop("annotations", None)
@@ -116,101 +189,100 @@ class CustomDatasetMapper(DatasetMapper):
 
         if self.with_jitter:
             dataset_dict["jitter_image"] = self.aug(dataset_dict["image"])
-            
+
         if self.with_crops:
             bbox = dataset_dict['instances'].gt_boxes.tensor
-            csx = (bbox[:,0] + bbox[:,2])*0.5
-            csy = (bbox[:,1] + bbox[:,3])*0.5
-            maxwh = torch.maximum(bbox[:,2]-bbox[:,0],bbox[:,3]-bbox[:,1])
+            csx = (bbox[:, 0] + bbox[:, 2]) * 0.5
+            csy = (bbox[:, 1] + bbox[:, 3]) * 0.5
+            maxwh = torch.maximum(bbox[:, 2] - bbox[:, 0], bbox[:, 3] - bbox[:, 1])
             crops = list()
             gt_boxes = list()
-            mean=[0.48145466, 0.4578275, 0.40821073]
-            std=[0.26862954, 0.26130258, 0.27577711]    
-            for cx,cy,maxdim,label,box in zip(csx,csy,maxwh,dataset_dict['instances'].gt_classes, bbox):
+            mean = [0.48145466, 0.4578275, 0.40821073]
+            std = [0.26862954, 0.26130258, 0.27577711]
+            for cx, cy, maxdim, label, box in zip(csx, csy, maxwh, dataset_dict['instances'].gt_classes, bbox):
 
                 if int(maxdim) < 10:
                     continue
-                x0 = torch.maximum(cx-maxdim*0.5,torch.tensor(0))
-                y0 = torch.maximum(cy-maxdim*0.5,torch.tensor(0))
+                x0 = torch.maximum(cx - maxdim * 0.5, torch.tensor(0))
+                y0 = torch.maximum(cy - maxdim * 0.5, torch.tensor(0))
                 try:
-                    imcrop = T.functional.resized_crop(dataset_dict['image'],top=int(y0),left=int(x0),height=int(maxdim),width=int(maxdim),size=224)
-                    imcrop = imcrop.flip(0)/255 # bgr --> rgb for clip
-                    imcrop = T.functional.normalize(imcrop,mean,std)
+                    imcrop = T.functional.resized_crop(dataset_dict['image'], top=int(y0), left=int(x0),
+                                                       height=int(maxdim), width=int(maxdim), size=224)
+                    imcrop = imcrop.flip(0) / 255  # bgr --> rgb for clip
+                    imcrop = T.functional.normalize(imcrop, mean, std)
                     # print(x0,y0,x0+maxdim,y0+maxdim,dataset_dict['image'].shape)
                     # print(imcrop.min(),imcrop.max() )
-                    gt_boxes.append(box.reshape(1,-1))
+                    gt_boxes.append(box.reshape(1, -1))
                 except Exception as e:
                     print(e)
-                    print('crops:',x0,y0,maxdim)
+                    print('crops:', x0, y0, maxdim)
                     exit()
                 # crops.append((imcrop,label))
                 crops.append(imcrop.unsqueeze(0))
-            
+
             if len(crops) == 0:
                 dataset_dict['crops'] = []
             else:
-                dataset_dict['crops'] = [torch.cat(crops,0),Boxes(torch.cat(gt_boxes,0))]
+                dataset_dict['crops'] = [torch.cat(crops, 0), Boxes(torch.cat(gt_boxes, 0))]
 
         if self.with_random_clip_crops:
             crops = []
             rbboxs = []
-            
+
             for i in range(20):
-                p = self.cropfn.get_params(dataset_dict['image'],[self.crop_size,self.crop_size])
-                c = tF.crop(dataset_dict['image'],*p)
+                p = self.cropfn.get_params(dataset_dict['image'], [self.crop_size, self.crop_size])
+                c = tF.crop(dataset_dict['image'], *p)
                 if self.crop_size != 224:
-                    c = tF.resize(img=c,size=224)
+                    c = tF.resize(img=c, size=224)
                 crops.append(c)
                 rbboxs.append(p)
-            
+
             crops = torch.stack(crops)
             dataset_dict['randomcrops'] = crops
 
-            #apply same crop bbox to the jittered image
+            # apply same crop bbox to the jittered image
             if self.with_jitter:
                 jitter_crops = []
                 for p in rbboxs:
-                    jc = tF.crop(dataset_dict['jitter_image'],*p) 
+                    jc = tF.crop(dataset_dict['jitter_image'], *p)
                     if self.crop_size != 224:
-                        jc = tF.resize(img=jc,size=224)
+                        jc = tF.resize(img=jc, size=224)
                     jitter_crops.append(jc)
-           
+
                 jcrops = torch.stack(jitter_crops)
                 dataset_dict['jitter_randomcrops'] = jcrops
-
-         
-
         return dataset_dict
 
+
 class CombineLoaders(data.IterableDataset):
-    def __init__(self,loaders):
+    def __init__(self, loaders):
         self.loaders = loaders
 
-    def __iter__(self,):
+    def __iter__(self, ):
         dd = iter(self.loaders[1])
         for d1 in self.loaders[0]:
             try:
                 d2 = next(dd)
             except:
-                dd=iter(self.loaders[1])
+                dd = iter(self.loaders[1])
                 d2 = next(dd)
 
-            list_out_dict=[]
-            for v1,v2 in zip(d1,d2):
+            list_out_dict = []
+            for v1, v2 in zip(d1, d2):
                 out_dict = {}
                 for k in v1.keys():
-                    out_dict[k] = (v1[k],v2[k])
+                    out_dict[k] = (v1[k], v2[k])
                 list_out_dict.append(out_dict)
 
             yield list_out_dict
 
-    
+
 class Trainer(DefaultTrainer):
 
-    def __init__(self,cfg) -> None:
+    def __init__(self, cfg) -> None:
         super().__init__(cfg)
         self.teach_model = None
-        self.off_opt_interval = np.arange(0,cfg.SOLVER.MAX_ITER,cfg.OFFSET_OPT_INTERVAL[0]).tolist()
+        self.off_opt_interval = np.arange(0, cfg.SOLVER.MAX_ITER, cfg.OFFSET_OPT_INTERVAL[0]).tolist()
         self.off_opt_iters = cfg.OFFSET_OPT_ITERS
 
     @classmethod
@@ -222,7 +294,6 @@ class Trainer(DefaultTrainer):
         Overwrite it if you'd like a different model.
         """
         model = build_model(cfg)
-        
 
         logger = logging.getLogger(__name__)
         logger.info("Model:\n{}".format(model))
@@ -230,10 +301,10 @@ class Trainer(DefaultTrainer):
         return model
 
     @classmethod
-    def build_train_loader(cls,cfg):
-        original  = cfg.DATASETS.TRAIN
+    def build_train_loader(cls, cfg):
+        original = cfg.DATASETS.TRAIN
         print(original)
-        cfg.DATASETS.TRAIN=(original[0],)
+        # cfg.DATASETS.TRAIN=(original[0],)
         data_loader1 = build_detection_train_loader(cfg, mapper=CustomDatasetMapper(cfg, True))
         return data_loader1
 
@@ -247,13 +318,13 @@ class Trainer(DefaultTrainer):
             return COCOEvaluator(dataset_name, output_dir=output_folder)
 
     @classmethod
-    def build_optimizer(cls,cfg,model):
-        
-        trainable = {'others':[],'offset':[]}
+    def build_optimizer(cls, cfg, model):
 
-        for name,val in model.named_parameters():
+        trainable = {'others': [], 'offset': []}
+
+        for name, val in model.named_parameters():
             head = name.split('.')[0]
-            #previously was setting all params to be true
+            # previously was setting all params to be true
             if val.requires_grad == True:
                 print(name)
                 if 'offset' in name or name == 'stylemean' or name == 'stylestd':
@@ -273,14 +344,12 @@ class Trainer(DefaultTrainer):
             trainable['offset'],
             0.01,
         )
-        return (maybe_add_gradient_clipping(cfg, optimizer1),maybe_add_gradient_clipping(cfg, optimizer2))
+        return (maybe_add_gradient_clipping(cfg, optimizer1), maybe_add_gradient_clipping(cfg, optimizer2))
 
-    
     def run_step(self):
         """
         Implement the standard training logic described above.
         """
-
 
         assert self.model.training, "[SimpleTrainer] model was changed to eval mode!"
         start = time.perf_counter()
@@ -296,50 +365,50 @@ class Trainer(DefaultTrainer):
         data_s = data
 
         opt_phase = False
-        if len(self.off_opt_interval) and self.iter >= self.off_opt_interval[0] and self.iter < self.off_opt_interval[0]+self.off_opt_iters:
-        
+        if len(self.off_opt_interval) and self.iter >= self.off_opt_interval[0] and self.iter < self.off_opt_interval[
+            0] + self.off_opt_iters:
+
             if self.iter == self.off_opt_interval[0]:
                 self.model.stylemean.data = torch.zeros(self.model.stylemean.shape).cuda()
                 self.model.stylestd.data = torch.zeros(self.model.stylestd.shape).cuda()
             loss_dict_s = self.model.opt_offsets(data_s)
             opt_phase = True
-            if self.iter+1 == self.off_opt_interval[0]+self.off_opt_iters:
+            if self.iter + 1 == self.off_opt_interval[0] + self.off_opt_iters:
                 self.off_opt_interval.pop(0)
-                
-        else:  
+
+        else:
             # for ind, d in enumerate(data_s):
             #     d['image'] = self.aug(d['image'].cuda())
             loss_dict_s = self.model(data_s)
             # print(loss_dict_s)
-        
+
         # import pdb;pdb.set_trace()
         loss_dict = {}
 
-        loss = 0 
-        for k,v in loss_dict_s.items():
+        loss = 0
+        for k, v in loss_dict_s.items():
             loss += v
 
-        
         """
         If you need to accumulate gradients or do something similar, you can
         wrap the optimizer with your custom `zero_grad()` method.
         """
-        self.optimizer[0].zero_grad() 
+        self.optimizer[0].zero_grad()
         self.optimizer[1].zero_grad()
 
-        loss.backward()   
+        loss.backward()
 
         if not opt_phase:
-            self.optimizer[0].step() 
+            self.optimizer[0].step()
         else:
             self.optimizer[1].step()
 
         self.optimizer[0].zero_grad()
         self.optimizer[1].zero_grad()
-        
-        for k,v in loss_dict_s.items():
-            loss_dict.update({k:v})
-        
+
+        for k, v in loss_dict_s.items():
+            loss_dict.update({k: v})
+
         # print(loss_di ct)
         self._trainer._write_metrics(loss_dict, data_time)
         """
@@ -387,7 +456,7 @@ class Trainer(DefaultTrainer):
 
         def do_test_st(flag):
             if flag == 'st':
-                model = self.model 
+                model = self.model
             else:
                 print("Error in the flag")
 
@@ -401,12 +470,11 @@ class Trainer(DefaultTrainer):
                     logger.info("Evaluation results for {} in csv format:".format(dataset_name))
                     print_csv_format(results_i)
                     storage = get_event_storage()
-                    storage.put_scalar(f'{dataset_name}_AP50', results_i['bbox']['AP50'],smoothing_hint=False)
+                    storage.put_scalar(f'{dataset_name}_AP50', results_i['bbox']['AP50'], smoothing_hint=False)
             if len(results) == 1:
                 results = list(results.values())[0]
             return results
-        
-       
+
         # Do evaluation after checkpointer, because then if it fails,
         # we can use the saved checkpoint to debug.
         ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD, test_and_save_results))
@@ -439,7 +507,6 @@ class Trainer(DefaultTrainer):
         self.optimizer[1].load_state_dict(state_dict["optimizer2"])
 
 
-
 class LRScheduler(HookBase):
     """
     A hook which executes a torch builtin LR scheduler and summarizes the LR.
@@ -469,7 +536,6 @@ class LRScheduler(HookBase):
             )
         self._best_param_group_id1 = LRScheduler.get_best_param_group_id(self._optimizer[0])
         self._best_param_group_id2 = LRScheduler.get_best_param_group_id(self._optimizer[1])
-
 
     @staticmethod
     def get_best_param_group_id(optimizer):
@@ -514,8 +580,8 @@ class LRScheduler(HookBase):
             logger.info("Loading scheduler from state_dict ...")
             self.scheduler.load_state_dict(state_dict)
 
-def custom_build_detection_test_loader(cfg,dataset_name,mapper=None):
 
+def custom_build_detection_test_loader(cfg, dataset_name, mapper=None):
     if isinstance(dataset_name, str):
         dataset_name = [dataset_name]
 
@@ -530,7 +596,7 @@ def custom_build_detection_test_loader(cfg,dataset_name,mapper=None):
     )
     if mapper is None:
         mapper = DatasetMapper(cfg, False)
-   
+
     if isinstance(dataset, list):
         dataset = DatasetFromList(dataset, copy=False)
     if mapper is not None:
@@ -542,7 +608,7 @@ def custom_build_detection_test_loader(cfg,dataset_name,mapper=None):
     else:
         if sampler is None:
             sampler = InferenceSampler(len(dataset))
-    collate_fn  = None
+    collate_fn = None
 
     def trivial_batch_collator(batch):
         """
@@ -571,9 +637,10 @@ def do_test(cfg, model, model_type=''):
             logger.info("Evaluation results for {} in csv format:".format(dataset_name))
             print_csv_format(results_i)
 
-        if len(results) == 1:       
+        if len(results) == 1:
             results = list(results.values())[0]
     return results
+
 
 def main(args):
     cfg = setup(args)
@@ -582,17 +649,18 @@ def main(args):
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
-        return do_test(cfg,model)
+        return do_test(cfg, model)
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     for dataset_name in cfg.DATASETS.TEST:
         if 'daytime_clear_test' in dataset_name or 'dusk_rainy_train' in dataset_name or 'night_sunny_test' in dataset_name or 'night_rainy_train' in dataset_name or 'daytime_foggy_train' in dataset_name:
             trainer.register_hooks([
-                    hooks.BestCheckpointer(cfg.TEST.EVAL_SAVE_PERIOD,trainer.checkpointer,f'{dataset_name}_AP50',file_prefix='model_best'),
-                    ])
+                hooks.BestCheckpointer(cfg.TEST.EVAL_SAVE_PERIOD, trainer.checkpointer, f'{dataset_name}_AP50',
+                                       file_prefix='model_best'),
+            ])
 
     trainer.train()
-    
+
 
 if __name__ == "__main__":
     args = default_argument_parser().parse_args()
