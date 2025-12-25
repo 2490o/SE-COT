@@ -92,57 +92,38 @@ class CustomDatasetMapper(DatasetMapper):
                 "jpeg_compression", "pixelate", "elastic_transform",
                 "brightness", "saturate", "contrast", "high_pass_filter", "phase_scaling"
             ]
-            # 设置数据增强的概率 (例如 0.5 表示 50% 的概率变坏，50% 保持原图)
-            # 如果你想完全模拟之前的 'cp' 数据集混合效果，这个比例很重要
+
             self.corruption_prob = 0.5
 
     def apply_corruption(self, image_bgr):
-        """
-        严格模仿离线代码的处理流程
-        Args:
-            image_bgr: Detectron2 读取的图片，格式为 NumPy BGR
-        Returns:
-            image_bgr_corrupted: 处理后的图片，格式为 NumPy BGR
-        """
-        # 1. 转换为 RGB
-        # 确保这里使用的是参数名 image_bgr
         img_rgb = image_bgr[:, :, ::-1]
-
-        # 2. 随机选择增强
         c_type = random.choice(self.corruption_func)
         severity = random.randint(1, 5)
 
         try:
-            # 3. 直接传入 RGB NumPy 数组
             aug_result = self.acvc.apply_corruption(img_rgb, c_type, severity)
-
-            # 4. 处理返回结果 (兼容 PIL 和 Numpy)
             if isinstance(aug_result, Image.Image):
                 aug_result = np.array(aug_result.convert("RGB"))
 
-            # 5. 转回 BGR 给 Detectron2 使用
             return aug_result[:, :, ::-1]
 
         except Exception as e:
             print(f"[Warning] Corruption {c_type} failed: {e}")
-            # 如果出错，返回原始图像 (参数名 image_bgr)
             return image_bgr
 
     def __call__(self, dataset_dict):
         dataset_dict = copy.deepcopy(dataset_dict)
 
-        # 1. 读取原始图片 (daytime_clear 下的图片)
         image = utils.read_image(dataset_dict["file_name"], format=self.image_format)
         utils.check_image_size(dataset_dict, image)
 
-        # --- 新增：在线应用数据增强 (Only during training) ---
         if self.is_train and np.random.rand() < self.corruption_prob:
-            # 对 image (numpy array) 直接进行破坏
+
             image = self.apply_corruption(image)
 
         # if self.debug_count < self.max_debug_save:
         #     try:
-        #         # 加上时间戳防止文件名冲突
+        #
         #         timestamp = int(time.time() * 1000)
         #         filename = f"debug_aug_{self.debug_count}_{timestamp}.jpg"
         #         save_path = os.path.join(self.debug_save_dir, filename)
@@ -155,7 +136,6 @@ class CustomDatasetMapper(DatasetMapper):
         #         print(f"Failed to save debug image: {e}")
         # ------------------------------------------------
 
-        # 2. 后续原有的处理流程 (语义分割、转换、Tensor化等) 保持不变
         if "sem_seg_file_name" in dataset_dict:
             sem_seg_gt = utils.read_image(dataset_dict.pop("sem_seg_file_name"), "L").squeeze(2)
         else:
@@ -171,15 +151,13 @@ class CustomDatasetMapper(DatasetMapper):
         if sem_seg_gt is not None:
             dataset_dict["sem_seg"] = torch.as_tensor(sem_seg_gt.astype("long"))
 
-        # USER: Remove if you don't use pre-computed proposals.
-        # Most users would not need this feature.
+
         if self.proposal_topk is not None:
             utils.transform_proposals(
                 dataset_dict, image_shape, transforms, proposal_topk=self.proposal_topk
             )
 
         if not self.is_train:
-            # USER: Modify this if you want to keep them for some reason.
             dataset_dict.pop("annotations", None)
             dataset_dict.pop("sem_seg_file_name", None)
             return dataset_dict
@@ -210,8 +188,7 @@ class CustomDatasetMapper(DatasetMapper):
                                                        height=int(maxdim), width=int(maxdim), size=224)
                     imcrop = imcrop.flip(0) / 255  # bgr --> rgb for clip
                     imcrop = T.functional.normalize(imcrop, mean, std)
-                    # print(x0,y0,x0+maxdim,y0+maxdim,dataset_dict['image'].shape)
-                    # print(imcrop.min(),imcrop.max() )
+
                     gt_boxes.append(box.reshape(1, -1))
                 except Exception as e:
                     print(e)
@@ -653,7 +630,7 @@ def main(args):
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
     for dataset_name in cfg.DATASETS.TEST:
-        if 'daytime_clear_test' in dataset_name or 'dusk_rainy_train' in dataset_name or 'night_sunny_test' in dataset_name or 'night_rainy_train' in dataset_name or 'daytime_foggy_train' in dataset_name:
+        if 'daytime_clear_test' in dataset_name:
             trainer.register_hooks([
                 hooks.BestCheckpointer(cfg.TEST.EVAL_SAVE_PERIOD, trainer.checkpointer, f'{dataset_name}_AP50',
                                        file_prefix='model_best'),
