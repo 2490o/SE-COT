@@ -1,1 +1,0 @@
-<annotation><filename>8f772bfe-6961d9be.jpg</filename><attributes><weather>rainy</weather><scene>highway</scene><timeofday>daytime</timeofday></attributes><object><name>car</name><bndbox><xmin>460</xmin><ymin>405</ymin><xmax>505</xmax><ymax>449</ymax></bndbox><difficult>0</difficult><truncated>0</truncated><pose>0</pose></object></annotation>
